@@ -9,7 +9,10 @@ from telegram.ext import (
 )
 
 import db
-from config import BOT_TOKEN, ADMIN_ID
+import os
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID")
 
 # ===================== STATE =====================
 user_state = {}
