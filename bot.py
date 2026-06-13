@@ -1,173 +1,125 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 import db
-import os
+import config
+from utils import log, is_admin
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-ADMIN_ID = os.getenv("ADMIN_ID")
-ADMIN_ID = int(ADMIN_ID) if ADMIN_ID and ADMIN_ID.isdigit() else None
-# ===================== STATE =====================
 user_state = {}
 
-
-# ===================== UI HELPERS =====================
-def product_caption(p):
-    return f"""
-🛒 {p[1]}
-💰 قیمت: {p[2]} تومان
-🆔 کد: {p[0]}
-"""
+# ---------- START ----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 خوش آمدی", reply_markup=menu())
 
 
-def main_menu():
+def menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛍 محصولات", callback_data="products")],
-        [InlineKeyboardButton("🛒 سبد خرید", callback_data="cart")]
+        [InlineKeyboardButton("🛒 سبد", callback_data="cart")],
+        [InlineKeyboardButton("🔐 ورود ادمین", callback_data="admin_login")]
     ])
 
 
-# ===================== START =====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 به فروشگاه ما خوش اومدی!",
-        reply_markup=main_menu()
-    )
-
-
-# ===================== SHOW PRODUCTS =====================
+# ---------- PRODUCTS ----------
 async def show_products(update, context):
-    products = db.get_products()
-
-    if not products:
-        await update.effective_message.reply_text("❌ محصولی وجود ندارد")
-        return
-
-    for p in products:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ افزودن به سبد", callback_data=f"add_{p[0]}")]
+    for p in db.get_products():
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ افزودن", callback_data=f"add_{p[0]}")]
         ])
 
         if p[3]:
-            await update.effective_message.reply_photo(
-                photo=p[3],
-                caption=product_caption(p),
-                reply_markup=keyboard
-            )
+            await update.effective_message.reply_photo(p[3], caption=f"{p[1]} - {p[2]}", reply_markup=kb)
         else:
-            await update.effective_message.reply_text(
-                product_caption(p),
-                reply_markup=keyboard
-            )
+            await update.effective_message.reply_text(f"{p[1]} - {p[2]}", reply_markup=kb)
 
 
-# ===================== CALLBACK HANDLER =====================
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+# ---------- CALLBACK ----------
+async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
 
-    user_id = query.from_user.id
-    data = query.data
+    uid = q.from_user.id
+    data = q.data
 
-    # 🛍 محصولات
     if data == "products":
-        await query.message.reply_text("🛍 لیست محصولات:")
         await show_products(update, context)
 
-    # 🛒 سبد خرید
     elif data == "cart":
-        cart = db.get_cart(user_id)
+        cart = db.get_cart(uid)
 
-        if not cart:
-            await query.message.reply_text("🛒 سبد خرید خالیه")
-            return
-
-        text = "🛒 سبد خرید شما:\n\n"
+        text = "🛒 سبد:\n"
         total = 0
 
-        for item in cart:
-            p = db.get_product(item[0])
-            text += f"• {p[1]} - {p[2]} تومان\n"
-            total += p[2]
+        for pid, qty in cart:
+            p = db.get_product(pid)
+            total += p[2] * qty
+            text += f"{p[1]} x{qty}\n"
 
-        text += f"\n💰 مجموع: {total} تومان"
+        await q.message.reply_text(text + f"\n💰 {total}")
 
-        await query.message.reply_text(text)
-
-    # ➕ افزودن به سبد
     elif data.startswith("add_"):
-        pid = int(data.split("_")[1])
-        db.add_to_cart(user_id, pid)
-        await query.message.reply_text("✅ اضافه شد به سبد خرید!")
+        db.add_to_cart(uid, int(data.split("_")[1]))
+        await q.message.reply_text("✔ اضافه شد")
+
+    elif data == "admin_login":
+        user_state[uid] = {"step": "password"}
+        await q.message.reply_text("🔐 رمز ادمین؟")
 
 
-# ===================== ADMIN FLOW =====================
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+# ---------- MESSAGE ----------
+async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.message.from_user.id
     text = update.message.text
 
-    # 👨‍💼 فقط ادمین
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ دسترسی نداری")
-        return
+    state = user_state.get(uid)
 
-    # شروع افزودن محصول
-    if text == "/add":
-        user_state[user_id] = {"step": "photo"}
-        await update.message.reply_text("📸 عکس محصول رو بفرست")
-        return
-
-    state = user_state.get(user_id)
-
-    if not state:
-        return
-
-    # 📸 عکس
-    if state["step"] == "photo":
-        if update.message.photo:
-            state["photo"] = update.message.photo[-1].file_id
-            state["step"] = "name"
-            await update.message.reply_text("✏️ اسم محصول")
+    # login admin
+    if state and state["step"] == "password":
+        if text == config.ADMIN_PASSWORD:
+            config.ADMINS.add(uid)
+            await update.message.reply_text("✔ ادمین شدی")
         else:
-            await update.message.reply_text("❌ فقط عکس بفرست")
+            await update.message.reply_text("❌ اشتباه")
+        user_state.pop(uid)
         return
 
-    # 📝 اسم
-    if state["step"] == "name":
-        state["name"] = text
-        state["step"] = "price"
-        await update.message.reply_text("💰 قیمت")
+    # admin panel
+    if is_admin(uid):
+        if text == "/add":
+            user_state[uid] = {"step": "photo"}
+            await update.message.reply_text("📸 عکس محصول")
+            return
+
+        if uid in user_state:
+            s = user_state[uid]
+
+            if s["step"] == "photo":
+                if update.message.photo:
+                    s["photo"] = update.message.photo[-1].file_id
+                    s["step"] = "name"
+                    await update.message.reply_text("نام؟")
+
+            elif s["step"] == "name":
+                s["name"] = text
+                s["step"] = "price"
+                await update.message.reply_text("قیمت؟")
+
+            elif s["step"] == "price":
+                db.add_product(s["name"], int(text), s["photo"])
+                await update.message.reply_text("✔ اضافه شد")
+                user_state.pop(uid)
         return
 
-    # 💰 قیمت
-    if state["step"] == "price":
-        state["price"] = int(text)
 
-        db.add_product(
-            state["name"],
-            state["price"],
-            state["photo"]
-        )
-
-        await update.message.reply_text("✅ محصول اضافه شد!")
-
-        user_state.pop(user_id)
-        return
-
-
-# ===================== APP =====================
-app = Application.builder().token(BOT_TOKEN).build()
+# ---------- APP ----------
+app = Application.builder().token(config.BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(callback_handler))
-app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, message_handler))
+app.add_handler(CallbackQueryHandler(cb))
+app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, msg))
+
+db.init_db()
+
+log("Bot started")
 
 app.run_polling()

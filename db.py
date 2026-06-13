@@ -1,62 +1,78 @@
+import os
 import sqlite3
+import psycopg2
 
-conn = sqlite3.connect("shop.db", check_same_thread=False)
-cursor = conn.cursor()
+USE_PG = os.getenv("DATABASE_URL") is not None
 
-# محصولات
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS products (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    price INTEGER,
-    image TEXT
-)
-""")
+if USE_PG:
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+else:
+    conn = sqlite3.connect("shop.db", check_same_thread=False)
 
-# سبد خرید
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS cart (
-    user_id INTEGER,
-    product_id INTEGER
-)
-""")
+cur = conn.cursor()
 
-conn.commit()
+# ---------- INIT ----------
+def init_db():
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS products (
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        price INT,
+        image TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS cart (
+        user_id BIGINT,
+        product_id INT,
+        qty INT DEFAULT 1
+    )
+    """)
+    conn.commit()
 
 
-# ===== محصولات =====
+# ---------- PRODUCTS ----------
 def add_product(name, price, image):
-    cursor.execute(
-        "INSERT INTO products (name, price, image) VALUES (?, ?, ?)",
+    cur.execute(
+        "INSERT INTO products (name, price, image) VALUES (%s, %s, %s)",
         (name, price, image)
     )
     conn.commit()
 
 
 def get_products():
-    cursor.execute("SELECT * FROM products")
-    return cursor.fetchall()
+    cur.execute("SELECT * FROM products")
+    return cur.fetchall()
 
 
 def get_product(pid):
-    cursor.execute("SELECT * FROM products WHERE id=?", (pid,))
-    return cursor.fetchone()
+    cur.execute("SELECT * FROM products WHERE id=%s", (pid,))
+    return cur.fetchone()
 
 
-# ===== سبد خرید =====
-def add_to_cart(user_id, pid):
-    cursor.execute(
-        "INSERT INTO cart (user_id, product_id) VALUES (?, ?)",
-        (user_id, pid)
+# ---------- CART ----------
+def add_to_cart(uid, pid):
+    cur.execute(
+        "SELECT qty FROM cart WHERE user_id=%s AND product_id=%s",
+        (uid, pid)
     )
+    row = cur.fetchone()
+
+    if row:
+        cur.execute(
+            "UPDATE cart SET qty = qty + 1 WHERE user_id=%s AND product_id=%s",
+            (uid, pid)
+        )
+    else:
+        cur.execute(
+            "INSERT INTO cart (user_id, product_id, qty) VALUES (%s,%s,1)",
+            (uid, pid)
+        )
+
     conn.commit()
 
 
-def get_cart(user_id):
-    cursor.execute("SELECT product_id FROM cart WHERE user_id=?", (user_id,))
-    return cursor.fetchall()
-
-
-def clear_cart(user_id):
-    cursor.execute("DELETE FROM cart WHERE user_id=?", (user_id,))
-    conn.commit()
+def get_cart(uid):
+    cur.execute("SELECT product_id, qty FROM cart WHERE user_id=%s", (uid,))
+    return cur.fetchall()
